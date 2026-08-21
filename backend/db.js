@@ -61,7 +61,10 @@ CREATE TABLE IF NOT EXISTS messages (
   channel_id TEXT NOT NULL,
   author_id TEXT NOT NULL,
   content TEXT NOT NULL,
+  attachments TEXT,            -- JSON 数组：[{type:'image', key, width, height}]
+  mentions TEXT,               -- JSON 数组：[user_id, ...]
   created_at INTEGER NOT NULL,
+  update_time INTEGER,         -- null=未编辑
   FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
   FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
 );
@@ -72,11 +75,24 @@ CREATE TABLE IF NOT EXISTS dm_messages (
   sender_id TEXT NOT NULL,
   recipient_id TEXT NOT NULL,
   content TEXT NOT NULL,
+  attachments TEXT,
   created_at INTEGER NOT NULL,
+  update_time INTEGER,
   FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
   FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_dm_pair_time ON dm_messages(sender_id, recipient_id, created_at DESC);
+
+-- 消息表情回复（emoji 反应）
+CREATE TABLE IF NOT EXISTS message_reactions (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  emoji TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(message_id, user_id, emoji)
+);
+CREATE INDEX IF NOT EXISTS idx_reactions_msg ON message_reactions(message_id);
 
 -- 问答区
 CREATE TABLE IF NOT EXISTS tags (
@@ -151,6 +167,17 @@ function migrate() {
   add('notify_sound', 'INTEGER NOT NULL DEFAULT 1');
   add('last_login_at', 'INTEGER');
   add('last_login_ip', 'TEXT');
+  // —— messages 旧库补字段 ——
+  const mCols = db.prepare("PRAGMA table_info(messages)").all().map((c) => c.name);
+  const mAdd = (col, def) => { if (!mCols.includes(col)) db.exec(`ALTER TABLE messages ADD COLUMN ${col} ${def}`); };
+  mAdd('attachments', 'TEXT');
+  mAdd('mentions', 'TEXT');
+  mAdd('update_time', 'INTEGER');
+  // —— dm_messages 旧库补字段 ——
+  const dCols = db.prepare("PRAGMA table_info(dm_messages)").all().map((c) => c.name);
+  const dAdd = (col, def) => { if (!dCols.includes(col)) db.exec(`ALTER TABLE dm_messages ADD COLUMN ${col} ${def}`); };
+  dAdd('attachments', 'TEXT');
+  dAdd('update_time', 'INTEGER');
 }
 migrate();
 
@@ -204,13 +231,28 @@ const stmts = {
      ORDER BY m.created_at DESC LIMIT ?`
   ),
   createMessage: db.prepare(
-    'INSERT INTO messages (id, channel_id, author_id, content, created_at) VALUES (?, ?, ?, ?, ?)'
+    'INSERT INTO messages (id, channel_id, author_id, content, attachments, mentions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
   ),
   getMessage: db.prepare(
     `SELECT m.*, u.username AS author_username, u.display_name AS author_display_name, u.avatar_color AS author_avatar_color
      FROM messages m JOIN users u ON u.id = m.author_id WHERE m.id = ?`
   ),
+  updateMessage: db.prepare(
+    'UPDATE messages SET content = ?, attachments = ?, mentions = ?, update_time = ? WHERE id = ?'
+  ),
   deleteMessage: db.prepare('DELETE FROM messages WHERE id = ?'),
+
+  // —— 表情回复 ——
+  addReaction: db.prepare(
+    'INSERT OR IGNORE INTO message_reactions (id, message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?, ?)'
+  ),
+  removeReaction: db.prepare(
+    'DELETE FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?'
+  ),
+  listReactions: db.prepare(
+    `SELECT emoji, COUNT(*) AS count, GROUP_CONCAT(user_id) AS user_ids
+     FROM message_reactions WHERE message_id = ? GROUP BY emoji`
+  ),
 
   // —— DM ——
   listDMMessages: db.prepare(
@@ -222,12 +264,15 @@ const stmts = {
      ORDER BY m.created_at DESC LIMIT ?`
   ),
   createDM: db.prepare(
-    'INSERT INTO dm_messages (id, sender_id, recipient_id, content, created_at) VALUES (?, ?, ?, ?, ?)'
+    'INSERT INTO dm_messages (id, sender_id, recipient_id, content, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?)'
   ),
   getDM: db.prepare(
     `SELECT m.*, u.username AS author_username, u.display_name AS author_display_name, u.avatar_color AS author_avatar_color,
        (m.sender_id = ?) AS is_outgoing
      FROM dm_messages m JOIN users u ON u.id = m.sender_id WHERE m.id = ?`
+  ),
+  updateDM: db.prepare(
+    'UPDATE dm_messages SET content = ?, attachments = ?, update_time = ? WHERE id = ?'
   ),
 
   // —— 标签 ——

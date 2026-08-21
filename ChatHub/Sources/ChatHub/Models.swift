@@ -42,12 +42,33 @@ struct Author: Codable, Identifiable, Hashable {
     let avatarColor: String
 }
 
+struct Attachment: Codable, Identifiable, Hashable {
+    let type: String
+    let key: String
+    let width: Int
+    let height: Int
+    var id: String { key }
+    var isImage: Bool { type == "image" }
+}
+
+struct Reaction: Codable, Identifiable, Hashable {
+    let emoji: String
+    let count: Int
+    let userIds: [String]
+    var id: String { emoji }
+    func contains(_ userId: String) -> Bool { userIds.contains(userId) }
+}
+
 struct ChannelMessage: Codable, Identifiable, Hashable {
     let id: String
     let channelId: String
     let authorId: String
-    let content: String
+    var content: String
     let createdAt: Double
+    var updateTime: Double?
+    var attachments: [Attachment]
+    var mentions: [String]
+    var reactions: [Reaction]
     let author: Author
 }
 
@@ -55,9 +76,12 @@ struct DMMessage: Codable, Identifiable, Hashable {
     let id: String
     let senderId: String
     let recipientId: String
-    let content: String
+    var content: String
     let createdAt: Double
     let isOutgoing: Bool
+    var updateTime: Double?
+    var attachments: [Attachment]
+    var reactions: [Reaction]
     let author: Author
 }
 

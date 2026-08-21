@@ -18,6 +18,7 @@ enum APIError: LocalizedError {
 final class APIClient {
     let baseURL: URL
     var token: String?
+    static let shared = APIClient()
 
     init(baseURL: URL = URL(string: "http://localhost:8787")!) {
         self.baseURL = baseURL
@@ -86,8 +87,8 @@ final class APIClient {
         return try await request(path).messages
     }
     struct MessageResponse: Codable { let message: ChannelMessage }
-    func sendChannelMessage(_ channelId: String, content: String) async throws -> ChannelMessage {
-        try await request("/api/channels/\(channelId)/messages", method: "POST", body: ["content": content]).message
+    func sendChannelMessage(_ channelId: String, content: String, attachments: [Attachment] = []) async throws -> ChannelMessage {
+        try await request("/api/channels/\(channelId)/messages", method: "POST", body: ["content": content, "attachments": attachments]).message
     }
 
     // —— DM ——
@@ -98,9 +99,56 @@ final class APIClient {
         return try await request(path).messages
     }
     struct DMResponse: Codable { let message: DMMessage }
-    func sendDM(_ userId: String, content: String) async throws -> DMMessage {
-        try await request("/api/dms/\(userId)/messages", method: "POST", body: ["content": content]).message
+    func sendDM(_ userId: String, content: String, attachments: [Attachment] = []) async throws -> DMMessage {
+        try await request("/api/dms/\(userId)/messages", method: "POST", body: ["content": content, "attachments": attachments]).message
     }
+
+    // —— 消息编辑 ——
+    struct MessageResponse: Codable { let message: ChannelMessage }
+    func editChannelMessage(_ id: String, content: String, attachments: [Attachment] = []) async throws -> ChannelMessage {
+        try await request("/api/messages/\(id)", method: "PUT", body: ["content": content, "attachments": attachments]).message
+    }
+    func editDM(_ id: String, content: String, attachments: [Attachment] = []) async throws -> DMMessage {
+        try await request("/api/messages/\(id)", method: "PUT", body: ["content": content, "attachments": attachments]).message
+    }
+
+    // —— 表情回复 ——
+    struct ReactionsResponse: Codable { let reactions: [Reaction] }
+    func reactions(_ messageId: String) async throws -> [Reaction] {
+        try await request("/api/messages/\(messageId)/reactions").reactions
+    }
+    func addReaction(_ messageId: String, emoji: String) async throws -> [Reaction] {
+        try await request("/api/messages/\(messageId)/reactions", method: "POST", body: ["emoji": emoji]).reactions
+    }
+    func removeReaction(_ messageId: String, emoji: String) async throws -> [Reaction] {
+        try await request("/api/messages/\(messageId)/reactions", method: "DELETE", body: ["emoji": emoji]).reactions
+    }
+
+    // —— 图片上传 ——
+    struct UploadResponse: Codable { let key: String; let size: Int; let mime: String }
+    func uploadImage(_ data: Data, mime: String = "image/png") async throws -> UploadResponse {
+        let boundary = "chathub-\(UUID().uuidString)"
+        var req = URLRequest(url: baseURL.appendingPathComponent("/api/uploads"))
+        req.httpMethod = "POST"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        if let t = token { req.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization") }
+        let ext = ["image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"][mime] ?? "png"
+        let body = Data()
+            + Data("--\(boundary)\r\n".utf8)
+            + Data("Content-Disposition: form-data; name=\"file\"; filename=\"upload.\(ext)\"\r\n".utf8)
+            + Data("Content-Type: \(mime)\r\n\r\n".utf8)
+            + data
+            + Data("\r\n--\(boundary)--\r\n".utf8)
+        req.httpBody = body
+        let (respData, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw APIError.http((resp as? HTTPURLResponse)?.statusCode ?? 0, "上传失败")
+        }
+        return try JSONDecoder().decode(UploadResponse.self, from: respData)
+    }
+
+    // —— 图片 URL ——
+    func imageURL(_ key: String) -> URL { baseURL.appendingPathComponent("/files/\(key)") }
 
     // —— 问答 ——
     struct QuestionsResponse: Codable { let questions: [Question] }
@@ -160,6 +208,10 @@ enum WSEvent {
     case answer(String, Answer)         // questionId, answer
     case answerAccepted(String, String, Answer)
     case messageDeleted(String, String) // channelId, messageId
+    case messageUpdatedChannel(String, ChannelMessage)  // channelId, message
+    case messageUpdatedDM(DMMessage, String)            // message, withUserId
+    case reaction(String, [Reaction], String)          // messageId, reactions, byUserId
+    case mention(ChannelMessage, String, String)        // message, channelId, byUserId
 }
 
 final class WSClient: NSObject {
@@ -238,6 +290,20 @@ final class WSClient: NSObject {
             case "message_deleted":
                 let r = try dec.decode(DeletedPayload.self, from: data)
                 onEvent?(.messageDeleted(r.channelId!, r.messageId!))
+            case "message_updated":
+                if obj["scope"] as? String == "channel" {
+                    let r = try dec.decode(ChannelMsgPayload.self, from: data)
+                    onEvent?(.messageUpdatedChannel(r.channelId!, r.message))
+                } else {
+                    let r = try dec.decode(DMPayload.self, from: data)
+                    onEvent?(.messageUpdatedDM(r.message, r.withUserId ?? ""))
+                }
+            case "reaction":
+                let r = try dec.decode(ReactionPayload.self, from: data)
+                onEvent?(.reaction(r.messageId!, r.reactions ?? [], r.byUserId ?? ""))
+            case "mention":
+                let r = try dec.decode(ChannelMsgPayload.self, from: data)
+                onEvent?(.mention(r.message, r.channelId ?? "", obj["byUserId"] as? String ?? ""))
             default: break
             }
         } catch { /* ignore */ }
@@ -247,6 +313,11 @@ final class WSClient: NSObject {
     private struct ChannelMsgPayload: Codable { let channelId: String?; let message: ChannelMessage }
     private struct DMPayload: Codable { let message: DMMessage; let withUserId: String? }
     private struct PresencePayload: Codable { let onlineUserIds: [String] }
+    private struct ReactionPayload: Codable {
+        let messageId: String?
+        let reactions: [Reaction]?
+        let byUserId: String?
+    }
     private struct QPayload: Codable { let question: Question }
     private struct APayload: Codable { let questionId: String?; let answer: Answer }
     private struct AcceptedPayload: Codable { let questionId: String?; let answerId: String?; let answer: Answer }
@@ -338,6 +409,10 @@ final class AppState: ObservableObject {
         case .answer: NotificationCenter.default.post(name: .newAnswer, object: ev)
         case .answerAccepted: NotificationCenter.default.post(name: .answerAccepted, object: ev)
         case .messageDeleted: NotificationCenter.default.post(name: .messageDeleted, object: ev)
+        case .messageUpdatedChannel: NotificationCenter.default.post(name: .messageUpdatedChannel, object: ev)
+        case .messageUpdatedDM: NotificationCenter.default.post(name: .messageUpdatedDM, object: ev)
+        case .reaction: NotificationCenter.default.post(name: .reaction, object: ev)
+        case .mention: NotificationCenter.default.post(name: .mention, object: ev)
         }
     }
 }
@@ -349,6 +424,10 @@ extension Notification.Name {
     static let newAnswer = Notification.Name("newAnswer")
     static let answerAccepted = Notification.Name("answerAccepted")
     static let messageDeleted = Notification.Name("messageDeleted")
+    static let messageUpdatedChannel = Notification.Name("messageUpdatedChannel")
+    static let messageUpdatedDM = Notification.Name("messageUpdatedDM")
+    static let reaction = Notification.Name("reaction")
+    static let mention = Notification.Name("mention")
 }
 
 // MARK: - 主题解析

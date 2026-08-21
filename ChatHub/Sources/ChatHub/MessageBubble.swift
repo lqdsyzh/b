@@ -3,10 +3,20 @@ import SwiftUI
 struct MessageBubble: View {
     let message: any IdentifiableMessage
     let me: String?
+    var onAddReaction: ((String) -> Void)? = nil
+    var onToggleReaction: ((String) -> Void)? = nil
+    var onEdit: (() -> Void)? = nil
+    @EnvironmentObject var state: AppState
+
+    @State private var largeImageKey: String?
 
     private var outgoing: Bool {
         if let m = message as? DMMessage { return m.isOutgoing }
         return message.author.id == me
+    }
+    private var canEdit: Bool {
+        guard let me = me, let onEdit = onEdit else { return false }
+        return message.authorId == me && message.updateTime == nil && onEdit != nil
     }
 
     var body: some View {
@@ -18,13 +28,75 @@ struct MessageBubble: View {
                 HStack(spacing: 6) {
                     Text(message.author.displayName).font(.subheadline.bold())
                     Text(AppDate.time(message.createdAt)).font(.caption2).foregroundStyle(.secondary)
+                    if message.updateTime != nil {
+                        Text("已编辑").font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
                 contentBlockView
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(outgoing ? Color.accentColor.opacity(0.15) : Color.gray.opacity(0.12),
                                 in: RoundedRectangle(cornerRadius: 10))
+                // 附件图片
+                if !message.attachments.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(message.attachments.filter(\.isImage)) { att in
+                            AsyncImage(url: state.api.imageURL(att.key)) { img in
+                                img.resizable().scaledToFill()
+                            } placeholder: {
+                                RoundedRectangle(cornerRadius: 6).fill(.quaternary).frame(width: 120, height: 90)
+                            }
+                            .frame(width: 120, height: 90)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .onTapGesture { largeImageKey = att.key }
+                            .popover(isPresented: Binding(
+                                get: { largeImageKey == att.key },
+                                set: { if !$0 { largeImageKey = nil } }
+                            )) {
+                                AsyncImage(url: state.api.imageURL(att.key)) { img in
+                                    img.resizable().scaledToFit()
+                                } placeholder: { ProgressView() }
+                                .padding(12)
+                                .frame(maxWidth: 600, maxHeight: 500)
+                            }
+                        }
+                    }
+                }
+                // 表情回复行
+                if !message.reactions.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(message.reactions) { r in
+                            Button {
+                                if r.contains(me ?? "") { onToggleReaction?(r.emoji) }
+                                else { onAddReaction?(r.emoji) }
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Text(r.emoji)
+                                    Text("\(r.count)").font(.caption2.bold())
+                                }
+                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                .background(
+                                    r.contains(me ?? "") ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.15),
+                                    in: Capsule()
+                                )
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                }
             }
             if !outgoing { Spacer(minLength: 60) }
+        }
+        // 右键菜单：添加表情、编辑
+        .contextMenu {
+            Menu("添加表情") {
+                ForEach(["👍", "❤️", "🎉", "😂", "🚀", "👀", "✅"], id: \.self) { e in
+                    Button(e) { onAddReaction?(e) }
+                }
+            }
+            if canEdit {
+                Divider()
+                Button("编辑消息") { onEdit?() }
+            }
         }
     }
 

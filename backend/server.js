@@ -5,12 +5,19 @@
 const http = require('node:http');
 const crypto = require('node:crypto');
 const url = require('node:url');
+const fs = require('node:fs');
+const path = require('node:path');
 const { WebSocketServer } = require('ws');
 const { db, stmts } = require('./db');
 
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '0.0.0.0';
 const MAX_BODY = 1 << 20; // 1 MiB
+const MAX_UPLOAD = 8 << 20; // 8 MiB 图片上限
+const UPLOAD_DIR = path.join(__dirname, 'data', 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const EDIT_WINDOW_MS = 24 * 60 * 60 * 1000; // 消息发出后 24h 内可编辑
 
 // 防滥用阈值
 const RATE = {
@@ -75,10 +82,62 @@ function publicUser(u) {
     created_at: u.created_at, last_login_at: u.last_login_at || null,
   };
 }
+function parseJSON(text, fallback) {
+  if (!text) return fallback;
+  try { return JSON.parse(text); } catch { return fallback; }
+}
+// 归一化附件：只接受 image 类型，限制最多 4 张，给随机 key
+function normalizeAttachments(input) {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((a) => a && a.type === 'image')
+    .slice(0, 4)
+    .map((a) => ({
+      type: 'image',
+      key: String(a.key || '').slice(0, 128),
+      width: Number(a.width) || 0,
+      height: Number(a.height) || 0,
+    }))
+    .filter((a) => a.key);
+}
+// 从消息文本里解析 @username，返回命中的 user_id 列表（去重）
+function parseMentions(text, knownUsers) {
+  const set = new Set();
+  const re = /@([A-Za-z0-9_\u4e00-\u9fa5]{2,24})/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const name = m[1];
+    const u = knownUsers.get(name.toLowerCase());
+    if (u) set.add(u.id);
+  }
+  return [...set];
+}
+const EXT_BY_MIME = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
+// 用户名 -> user 行 的查找缓存（每次发消息时按需构建，避免 N 次查询）
+let _userByNameCache = null;
+let _userByNameCacheAt = 0;
+function userByNameMap() {
+  const now = nowMs();
+  if (_userByNameCache && now - _userByNameCacheAt < 5000) return _userByNameCache;
+  const map = new Map();
+  for (const u of db.prepare('SELECT id, username FROM users').all()) map.set(u.username.toLowerCase(), u);
+  _userByNameCache = map; _userByNameCacheAt = now;
+  return map;
+}
+function reactionsFor(messageId) {
+  return stmts.listReactions.all(messageId).map((r) => ({
+    emoji: r.emoji, count: r.count,
+    user_ids: r.user_ids ? r.user_ids.split(',') : [],
+  }));
+}
 function toChannelMessage(row) {
   return {
     id: row.id, channel_id: row.channel_id, author_id: row.author_id,
     content: row.content, created_at: row.created_at,
+    update_time: row.update_time || null,
+    attachments: parseJSON(row.attachments, []),
+    mentions: parseJSON(row.mentions, []),
+    reactions: reactionsFor(row.id),
     author: { id: row.author_id, username: row.author_username,
       display_name: row.author_display_name, avatar_color: row.author_avatar_color },
   };
@@ -87,6 +146,9 @@ function toDMMessage(row) {
   return {
     id: row.id, sender_id: row.sender_id, recipient_id: row.recipient_id,
     content: row.content, created_at: row.created_at, is_outgoing: !!row.is_outgoing,
+    update_time: row.update_time || null,
+    attachments: parseJSON(row.attachments, []),
+    reactions: reactionsFor(row.id),
     author: { id: row.sender_id, username: row.author_username,
       display_name: row.author_display_name, avatar_color: row.author_avatar_color },
   };
@@ -356,12 +418,18 @@ async function handleApi(req, res, parsed) {
     if (method === 'POST') {
       let body; try { body = await readJSONBody(req); } catch { return sendJSON(res, 400, { error: 'INVALID_BODY' }); }
       const content = String(body.content || '').trim();
-      if (!content) return sendJSON(res, 400, { error: 'EMPTY_CONTENT' });
+      const attachments = normalizeAttachments(body.attachments);
+      if (!content && attachments.length === 0) return sendJSON(res, 400, { error: 'EMPTY_CONTENT' });
       if (content.length > 8000) return sendJSON(res, 400, { error: 'MESSAGE_TOO_LONG' });
       const id = uuid(); const ts = nowMs();
-      stmts.createMessage.run(id, channelId, user.id, content, ts);
+      const mentions = parseMentions(content, userByNameMap());
+      stmts.createMessage.run(id, channelId, user.id, content, JSON.stringify(attachments), JSON.stringify(mentions), ts);
       const msg = toChannelMessage(stmts.getMessage.get(id));
       broadcast(JSON.stringify({ type: 'message', scope: 'channel', channelId, message: msg }));
+      // 私信提醒被@的人
+      for (const uid of mentions) if (uid !== user.id) {
+        sendToUser(uid, JSON.stringify({ type: 'mention', message: msg, channelId, byUserId: user.id }));
+      }
       return sendJSON(res, 201, { message: msg });
     }
   }
@@ -381,14 +449,124 @@ async function handleApi(req, res, parsed) {
     if (method === 'POST') {
       let body; try { body = await readJSONBody(req); } catch { return sendJSON(res, 400, { error: 'INVALID_BODY' }); }
       const content = String(body.content || '').trim();
-      if (!content) return sendJSON(res, 400, { error: 'EMPTY_CONTENT' });
+      const attachments = normalizeAttachments(body.attachments);
+      if (!content && attachments.length === 0) return sendJSON(res, 400, { error: 'EMPTY_CONTENT' });
       const id = uuid(); const ts = nowMs();
-      stmts.createDM.run(id, user.id, otherId, content, ts);
+      stmts.createDM.run(id, user.id, otherId, content, JSON.stringify(attachments), ts);
       const msg = toDMMessage(stmts.getDM.get(user.id, id));
       const payload = JSON.stringify({ type: 'message', scope: 'dm', message: msg, withUserId: otherId });
       sendToUser(user.id, payload); sendToUser(otherId, payload);
       return sendJSON(res, 201, { message: msg });
     }
+  }
+
+  // —— 消息编辑（频道 & DM 共用，按表归属分发）——
+  m = /^\/api\/messages\/([^/]+)$/.exec(pathname);
+  if (m && method === 'PUT') {
+    const id = decodeURIComponent(m[1]);
+    let body; try { body = await readJSONBody(req); } catch { return sendJSON(res, 400, { error: 'INVALID_BODY' }); }
+    const content = String(body.content || '').trim();
+    if (!content) return sendJSON(res, 400, { error: 'EMPTY_CONTENT' });
+    if (content.length > 8000) return sendJSON(res, 400, { error: 'MESSAGE_TOO_LONG' });
+    // 先查频道消息，再查 DM
+    let row = stmts.getMessage.get(id);
+    let isChannel = !!row;
+    if (!row) {
+      row = stmts.getDM.get(user.id, id);
+      if (!row) return sendJSON(res, 404, { error: 'MESSAGE_NOT_FOUND' });
+    }
+    const authorId = isChannel ? row.author_id : row.sender_id;
+    if (authorId !== user.id) return sendJSON(res, 403, { error: 'NOT_AUTHOR' });
+    if (nowMs() - row.created_at > EDIT_WINDOW_MS) return sendJSON(res, 403, { error: 'EDIT_WINDOW_EXPIRED' });
+    const attachments = normalizeAttachments(body.attachments);
+    const ts = nowMs();
+    if (isChannel) {
+      const mentions = parseMentions(content, userByNameMap());
+      stmts.updateMessage.run(content, JSON.stringify(attachments), JSON.stringify(mentions), ts, id);
+      const msg = toChannelMessage(stmts.getMessage.get(id));
+      broadcast(JSON.stringify({ type: 'message_updated', scope: 'channel', channelId: msg.channel_id, message: msg }));
+      return sendJSON(res, 200, { message: msg });
+    } else {
+      stmts.updateDM.run(content, JSON.stringify(attachments), ts, id);
+      const msg = toDMMessage(stmts.getDM.get(user.id, id));
+      const payload = JSON.stringify({ type: 'message_updated', scope: 'dm', message: msg, withUserId: row.recipient_id === user.id ? row.sender_id : row.recipient_id });
+      sendToUser(user.id, payload);
+      sendToUser(row.recipient_id === user.id ? row.sender_id : row.recipient_id, payload);
+      return sendJSON(res, 200, { message: msg });
+    }
+  }
+
+  // —— 消息表情回复 ——
+  m = /^\/api\/messages\/([^/]+)\/reactions$/.exec(pathname);
+  if (m) {
+    const id = decodeURIComponent(m[1]);
+    // 确认消息存在（频道或 DM）
+    let exists = stmts.getMessage.get(id) || stmts.getDM.get(user.id, id);
+    if (!exists) return sendJSON(res, 404, { error: 'MESSAGE_NOT_FOUND' });
+    if (method === 'GET') {
+      return sendJSON(res, 200, { reactions: reactionsFor(id) });
+    }
+    if (method === 'POST') {
+      let body; try { body = await readJSONBody(req); } catch { return sendJSON(res, 400, { error: 'INVALID_BODY' }); }
+      const emoji = String(body.emoji || '').trim().slice(0, 16);
+      if (!emoji) return sendJSON(res, 400, { error: 'EMOJI_REQUIRED' });
+      stmts.addReaction.run(uuid(), id, user.id, emoji, nowMs());
+      const reactions = reactionsFor(id);
+      const payload = JSON.stringify({ type: 'reaction', messageId: id, reactions, byUserId: user.id });
+      broadcast(payload);
+      return sendJSON(res, 200, { reactions });
+    }
+    if (method === 'DELETE') {
+      let body; try { body = await readJSONBody(req); } catch { body = {}; }
+      const emoji = String(body.emoji || '').trim().slice(0, 16);
+      if (!emoji) return sendJSON(res, 400, { error: 'EMOJI_REQUIRED' });
+      stmts.removeReaction.run(id, user.id, emoji);
+      const reactions = reactionsFor(id);
+      broadcast(JSON.stringify({ type: 'reaction', messageId: id, reactions, byUserId: user.id }));
+      return sendJSON(res, 200, { reactions });
+    }
+  }
+
+  // —— 图片上传（multipart/form-data，字段名 file）——
+  if (pathname === '/api/uploads' && method === 'POST') {
+    const ct = req.headers['content-type'] || '';
+    if (!ct.startsWith('multipart/form-data')) return sendJSON(res, 400, { error: 'MULTIPART_REQUIRED' });
+    const boundary = ct.split('boundary=')[1];
+    if (!boundary) return sendJSON(res, 400, { error: 'NO_BOUNDARY' });
+    const buf = await new Promise((resolve, reject) => {
+      const chunks = []; let total = 0; let big = false;
+      req.on('data', (c) => { total += c.length; if (total > MAX_UPLOAD) { big = true; req.destroy(); } else chunks.push(c); });
+      req.on('end', () => big ? reject(new Error('FILE_TOO_LARGE')) : resolve(Buffer.concat(chunks)));
+      req.on('error', reject);
+    }).catch((e) => sendJSON(res, 413, { error: e.message }) );
+    if (!buf) return;
+    // 极简 multipart 解析：找 boundary 分块
+    const parts = [];
+    const b = Buffer.from('--' + boundary);
+    let start = buf.indexOf(b);
+    while (start !== -1) {
+      const next = buf.indexOf(b, start + b.length);
+      if (next === -1) break;
+      parts.push(buf.slice(start + b.length + 2, next - 2)); // 去掉 \r\n 头尾
+      start = next;
+    }
+    let saved = null;
+    for (const part of parts) {
+      const headerEnd = part.indexOf('\r\n\r\n');
+      if (headerEnd === -1) continue;
+      const header = part.slice(0, headerEnd).toString();
+      const data = part.slice(headerEnd + 4, part.length - 2); // 去掉结尾 \r\n
+      if (!/name="file"/.test(header)) continue;
+      const mimeM = /Content-Type: ([^\r\n]+)/.exec(header);
+      const mime = mimeM ? mimeM[1].trim() : 'image/png';
+      if (!EXT_BY_MIME[mime]) return sendJSON(res, 400, { error: 'UNSUPPORTED_IMAGE_TYPE' });
+      const key = crypto.randomBytes(16).toString('hex') + EXT_BY_MIME[mime];
+      fs.writeFileSync(path.join(UPLOAD_DIR, key), data);
+      saved = { key, size: data.length, mime };
+      break;
+    }
+    if (!saved) return sendJSON(res, 400, { error: 'NO_FILE' });
+    return sendJSON(res, 201, saved);
   }
 
   // ========== 问答区 ==========
@@ -531,6 +709,18 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
   const parsed = url.parse(req.url, true);
+  // 图片静态资源（白名单 key，仅 data/uploads 下文件）
+  const fileM = /^\/files\/([a-f0-9]+\.(png|jpg|gif|webp))$/.exec(parsed.pathname);
+  if (fileM) {
+    const fp = path.join(UPLOAD_DIR, fileM[1]);
+    fs.stat(fp, (err, st) => {
+      if (err || !st.isFile()) return sendJSON(res, 404, { error: 'NOT_FOUND' });
+      const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }[path.extname(fileM[1])];
+      res.writeHead(200, { 'Content-Type': mime, 'Content-Length': st.size, 'Cache-Control': 'public, max-age=86400' });
+      fs.createReadStream(fp).pipe(res);
+    });
+    return;
+  }
   if (parsed.pathname.startsWith('/api/')) {
     try { await handleApi(req, res, parsed); }
     catch (err) { console.error('API error:', err); sendJSON(res, 500, { error: 'INTERNAL', message: String(err && err.message || err) }); }
