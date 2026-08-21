@@ -1,0 +1,20 @@
+{
+  "_comment": [
+    "ChatHub 网页版默认后端地址配置（选填，删掉或留空即退回默认规则）",
+    "",
+    "默认规则（不配置本文件时）：",
+    "  - 浏览器 localStorage 已保存的 chathub.server 值（用户在登录页⚙️手动配置过的话）",
+    "  - 否则，若当前访问域名是 localhost/127.0.0.1/局域网 → http://localhost:8787",
+    "  - 否则（部署到公网 OSS/CDN）：首次打开弹窗提示用户输入后端地址",
+    "",
+    "部署到阿里云时，把 defaultServer 填成你的后端公网地址即可，例如：",
+    "  有域名（推荐 HTTPS，避免混合内容）：",
+    '    "defaultServer": "https://chat-api.yourdomain.com"',
+    "  无域名（ECS 公网 IP，建议 HTTP 方式访问 OSS 静态站避免混合内容）：",
+    '    "defaultServer": "http://1.2.3.4:8787"',
+    "",
+    "⚠️ 重要：若 OSS 站是 https:// 协议，后端也必须是 HTTPS（否则浏览器会拦截混合请求）。",
+    "若暂时只有 HTTP 后端，请使用 OSS 静态站的 HTTP 域名访问前端。"
+  ],
+  "defaultServer": ""
+}

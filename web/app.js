@@ -9,7 +9,43 @@ const STORAGE = {
   USER: 'chathub.user',
 };
 
-const DEFAULT_SERVER = 'http://localhost:8787';
+const FALLBACK_LOCAL = 'http://localhost:8787';
+let runtimeDefaultServer = null; // 启动时从 config.json 加载，管理员可预先配置
+let runtimeLoaded = false;
+
+function isLocalHostname(h){
+  if (!h) return true;
+  return h === 'localhost' || h === '127.0.0.1' || h === '0.0.0.0'
+    || /\.local$/.test(h) || /^192\.168\./.test(h)
+    || /^10\./.test(h) || /^172\.(1[6-9]|2[0-9]|3[01])\./.test(h)
+    || h.startsWith('::ffff:127.') || h === '[::1]';
+}
+
+async function loadRuntimeConfig(){
+  if (runtimeLoaded) return runtimeDefaultServer;
+  runtimeLoaded = true;
+  // 相对路径：auth.html 和 index.html 都在 web/ 下，直接取 config.json
+  try {
+    const r = await fetch('./config.json?_=' + Date.now(), { cache: 'no-store' });
+    if (r.ok) {
+      const cfg = await r.json();
+      const s = String(cfg && cfg.defaultServer || '').trim().replace(/\/+$/, '');
+      if (s) { runtimeDefaultServer = s; return s; }
+    }
+  } catch (_) { /* ignore (e.g. file:// protocol or no internet) */ }
+  // 无配置：根据域名推断
+  try {
+    const h = location.hostname;
+    if (!isLocalHostname(h)) {
+      // 公网部署但没配置后端：先留空，后续提示用户填写
+      runtimeDefaultServer = '';
+      return '';
+    }
+  } catch (_) {}
+  runtimeDefaultServer = FALLBACK_LOCAL;
+  return runtimeDefaultServer;
+}
+
 const EMOJIS = ['😀','😁','😂','🤣','😊','😍','😘','🤔','😎','🥳','😭','😡','🤯','😱','🤗','🙄','😴','🤮','🤩','🥺','😏','😇','🤠','🤡','👻','💀','👽','🤖','💩','😺','🙈','🙉','🙊','💯','✅','❌','⭐','🔥','💎','🎉','🎊','👍','👎','👋','🤝','🙏','💪','❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','💕','💞','💓','💗','💖','💘','💝','💟','👀','✨','⚡','🌈','☀️','🌙','⭐','💫','🎯','📌','📝','📎','🖼️','🎨','🎵','🔔','🔕','🐛','🚀','🛸','💡','🧠','📚','💻','⌨️','🖥️','🖱️','🗂️','☕','🍕','🍔','🍺','🍷','🥤','🐍','🦀','🦞','🐳','🦄'];
 
 // ===== Mini HTTP client =====
@@ -50,14 +86,44 @@ function uploadImage(server, token, file) {
 }
 
 // ===== Public API object (used by auth page) =====
+async function resolveServer() {
+  const saved = localStorage.getItem(STORAGE.SERVER);
+  if (saved) return saved;
+  await loadRuntimeConfig();
+  if (runtimeDefaultServer) return runtimeDefaultServer;
+  // 公网部署、无 localStorage、无 config.json：提示用户配置
+  const def = prompt(
+    '⚙️ 请填写 ChatHub 后端地址\n\n' +
+    '例如部署到阿里云 ECS：http://你的公网IP:8787\n' +
+    '或有域名 HTTPS：https://chat-api.你的域名.com\n\n' +
+    '(之后可以点登录页右下角「⚙️ 后端」随时修改)',
+    ''
+  );
+  if (def) {
+    let v = def.trim().replace(/\/+$/, '');
+    if (!/^https?:\/\//i.test(v)) v = 'http://' + v;
+    localStorage.setItem(STORAGE.SERVER, v);
+    return v;
+  }
+  return FALLBACK_LOCAL;
+}
 const CH = {
-  server() { return localStorage.getItem(STORAGE.SERVER) || DEFAULT_SERVER; },
+  server() { return localStorage.getItem(STORAGE.SERVER) || runtimeDefaultServer || FALLBACK_LOCAL; },
+  async resolveServer() { return resolveServer(); },
   setServer(v) { localStorage.setItem(STORAGE.SERVER, v); },
   getToken() { return localStorage.getItem(STORAGE.TOKEN); },
   saveToken(t) { localStorage.setItem(STORAGE.TOKEN, t); },
   clearToken() { localStorage.removeItem(STORAGE.TOKEN); localStorage.removeItem(STORAGE.USER); },
   call(path, method, body) { return api(this.server(), method, path, body, this.getToken()); },
-  boot() { /* noop here, main app does full boot */ },
+  async boot() {
+    // Auth 页启动时：先加载配置，确保后续 API 调用用的是正确的后端
+    try { await loadRuntimeConfig(); } catch (_) {}
+    // 若用户没有保存过 server，且当前非本地域名 → 提前弹一次让他填
+    const hasSaved = !!localStorage.getItem(STORAGE.SERVER);
+    if (!hasSaved && !runtimeDefaultServer && !isLocalHostname(location.hostname)) {
+      try { await resolveServer(); } catch (_) {}
+    }
+  },
   toast(msg, type) { showToast(msg, type); },
 };
 window.ChatHub = CH;

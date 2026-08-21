@@ -78,14 +78,20 @@
 <script src="app.js"></script>
 <script>
 // Auth-only logic
-(function(){
+(async function(){
   const API = window.ChatHub;
-  API.boot();
+  try { await API.boot(); } catch(_) {}
 
   const tabs = document.querySelectorAll('.auth-tab');
   const loginForm = document.getElementById('login-form');
   const regForm = document.getElementById('register-form');
   const errBox = document.getElementById('err');
+
+  // 同步显示当前后端地址
+  function refreshServerLabel(){
+    document.getElementById('server-label').textContent = '⚙️ 后端: ' + (API.server().replace(/^https?:\/\//,''));
+  }
+  refreshServerLabel();
 
   tabs.forEach(t => t.addEventListener('click', () => {
     tabs.forEach(x => x.classList.remove('active'));
