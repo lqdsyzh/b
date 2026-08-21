@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ChatHub · 登录</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="auth-wrap">
+  <div>
+    <a href="../index.html" class="back-link">← 返回宣传页</a>
+    <div class="auth-card">
+      <div class="logo"><span class="ic">💬</span><span>ChatHub</span></div>
+      <div class="sub">为聊天而建的编程社区</div>
+
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-tab="login">登录</button>
+        <button class="auth-tab" data-tab="register">注册</button>
+      </div>
+
+      <div id="err" class="err"></div>
+
+      <form id="login-form">
+        <div class="fld">
+          <label>用户名</label>
+          <input name="username" autocomplete="username" minlength="2" maxlength="24" placeholder="2-24 位字母/数字/中文" required>
+        </div>
+        <div class="fld">
+          <label>密码</label>
+          <input name="password" type="password" autocomplete="current-password" minlength="6" maxlength="64" placeholder="至少 6 位" required>
+        </div>
+        <button class="btn btn-primary" type="submit">登 录</button>
+      </form>
+
+      <form id="register-form" style="display:none">
+        <div class="fld">
+          <label>用户名</label>
+          <input name="username" autocomplete="username" minlength="2" maxlength="24" placeholder="2-24 位字母/数字/中文" required>
+          <div class="fld-hint">注册用户名 <b>admin</b> 将自动成为首任管理员 🎉</div>
+        </div>
+        <div class="fld">
+          <label>显示昵称（可选）</label>
+          <input name="display_name" autocomplete="nickname" minlength="1" maxlength="24" placeholder="留空则同用户名">
+        </div>
+        <div class="fld">
+          <label>密码</label>
+          <input name="password" type="password" autocomplete="new-password" minlength="6" maxlength="64" placeholder="至少 6 位" required>
+        </div>
+        <button class="btn btn-primary" type="submit">创建账号</button>
+      </form>
+
+      <div class="auth-footer">
+        <span id="server-label" class="server-config">⚙️ 后端: localhost:8787</span>
+        <span>v1.0 · MIT</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Server Config Modal -->
+<div class="modal-mask" id="cfg-mask">
+  <div class="modal">
+    <h3>⚙️ 后端服务地址</h3>
+    <p class="desc">ChatHub 网页版通过 HTTP + WebSocket 连接后端。默认后端运行在本机 <code>http://localhost:8787</code>，如果你已部署到服务器，请填写实际地址。</p>
+    <div class="fld">
+      <label>后端地址（HTTP / HTTPS）</label>
+      <input id="cfg-input" placeholder="https://your-chathub.example.com">
+      <div class="fld-hint">不带末尾斜杠。例如：<code>http://localhost:8787</code> 或 <code>https://chat.example.com</code></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="cfg-cancel">取消</button>
+      <button class="btn btn-primary" id="cfg-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+<script>
+// Auth-only logic
+(function(){
+  const API = window.ChatHub;
+  API.boot();
+
+  const tabs = document.querySelectorAll('.auth-tab');
+  const loginForm = document.getElementById('login-form');
+  const regForm = document.getElementById('register-form');
+  const errBox = document.getElementById('err');
+
+  tabs.forEach(t => t.addEventListener('click', () => {
+    tabs.forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    const is = t.dataset.tab === 'register';
+    loginForm.style.display = is ? 'none' : '';
+    regForm.style.display = is ? '' : 'none';
+    errBox.classList.remove('show');
+  }));
+
+  function showErr(m){ errBox.textContent = m; errBox.classList.add('show'); }
+
+  loginForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(loginForm);
+    const btn = loginForm.querySelector('button');
+    btn.disabled = true; errBox.classList.remove('show');
+    try{
+      const r = await API.call('/api/login', 'POST', {
+        username: String(fd.get('username')||'').trim(),
+        password: String(fd.get('password')||''),
+      });
+      API.saveToken(r.token);
+      API.toast('登录成功，正在进入…', 'ok');
+      setTimeout(() => location.href = 'index.html', 400);
+    }catch(err){ showErr(err.message || String(err)); }
+    finally{ btn.disabled = false; }
+  });
+
+  regForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(regForm);
+    const btn = regForm.querySelector('button');
+    btn.disabled = true; errBox.classList.remove('show');
+    try{
+      const body = {
+        username: String(fd.get('username')||'').trim(),
+        password: String(fd.get('password')||''),
+      };
+      const dn = String(fd.get('display_name')||'').trim();
+      if (dn) body.display_name = dn;
+      const r = await API.call('/api/register', 'POST', body);
+      API.saveToken(r.token);
+      API.toast(r.user && r.user.is_admin ? '🎉 管理员账号创建成功！' : '注册成功，正在进入…', 'ok');
+      setTimeout(() => location.href = 'index.html', 500);
+    }catch(err){ showErr(err.message || String(err)); }
+    finally{ btn.disabled = false; }
+  });
+
+  // Modal
+  const cfgLabel = document.getElementById('server-label');
+  const cfgMask = document.getElementById('cfg-mask');
+  const cfgInput = document.getElementById('cfg-input');
+  cfgLabel.textContent = '⚙️ 后端: ' + (API.server().replace(/^https?:\/\//,''));
+  cfgLabel.addEventListener('click', () => {
+    cfgInput.value = API.server();
+    cfgMask.classList.add('show');
+  });
+  document.getElementById('cfg-cancel').addEventListener('click', () => cfgMask.classList.remove('show'));
+  cfgMask.addEventListener('click', (e) => { if (e.target === cfgMask) cfgMask.classList.remove('show'); });
+  document.getElementById('cfg-save').addEventListener('click', () => {
+    let v = (cfgInput.value || '').trim().replace(/\/+$/,'');
+    if (!v) return API.toast('请填写后端地址', 'err');
+    if (!/^https?:\/\//.test(v)) v = 'http://' + v;
+    API.setServer(v);
+    cfgLabel.textContent = '⚙️ 后端: ' + v.replace(/^https?:\/\//,'');
+    cfgMask.classList.remove('show');
+    API.toast('已保存', 'ok');
+  });
+
+  // If already logged in, jump
+  if (API.getToken()) location.href = 'index.html';
+})();
+</script>
+</body>
+</html>

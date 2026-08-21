@@ -703,14 +703,41 @@ async function handleApi(req, res, parsed) {
 }
 
 // ---------- HTTP server ----------
+const WEB_DIR = path.join(__dirname, '..', 'web');
+const PROMO_DIR = path.join(__dirname, '..');
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf', '.map': 'application/json; charset=utf-8',
+};
+function serveStatic(res, filePath, maxAge) {
+  fs.stat(filePath, (err, st) => {
+    if (err || !st.isFile()) { sendJSON(res, 404, { error: 'NOT_FOUND' }); return; }
+    const ext = path.extname(filePath).toLowerCase();
+    const mime = MIME[ext] || 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': mime, 'Content-Length': st.size,
+      'Cache-Control': maxAge ? `public, max-age=${maxAge}` : 'no-cache' });
+    fs.createReadStream(filePath).pipe(res);
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
   const parsed = url.parse(req.url, true);
+  let pname = parsed.pathname;
+  // Decode simple percent-encoding
+  try { pname = decodeURIComponent(pname); } catch {}
+  // 健康检查
+  if (pname === '/health') return sendJSON(res, 200, { ok: true, service: 'chathub', ts: nowMs() });
   // 图片静态资源（白名单 key，仅 data/uploads 下文件）
-  const fileM = /^\/files\/([a-f0-9]+\.(png|jpg|gif|webp))$/.exec(parsed.pathname);
+  const fileM = /^\/files\/([a-f0-9]+\.(png|jpg|gif|webp))$/.exec(pname);
   if (fileM) {
     const fp = path.join(UPLOAD_DIR, fileM[1]);
     fs.stat(fp, (err, st) => {
@@ -721,13 +748,35 @@ const server = http.createServer(async (req, res) => {
     });
     return;
   }
-  if (parsed.pathname.startsWith('/api/')) {
+  if (pname.startsWith('/api/')) {
     try { await handleApi(req, res, parsed); }
     catch (err) { console.error('API error:', err); sendJSON(res, 500, { error: 'INTERNAL', message: String(err && err.message || err) }); }
     return;
   }
-  if (parsed.pathname === '/' || parsed.pathname === '/health') return sendJSON(res, 200, { ok: true, service: 'chathub', ts: nowMs() });
-  sendJSON(res, 404, { error: 'NOT_FOUND' });
+  // ===== Web 客户端静态文件 =====
+  if (pname === '/' || pname === '') {
+    res.writeHead(302, { Location: '/web/auth.html' });
+    return res.end();
+  }
+  // /web/* → <repo>/web/*
+  if (pname.startsWith('/web/')) {
+    const rel = pname.slice('/web/'.length);
+    if (rel.includes('..') || rel.startsWith('/')) return sendJSON(res, 404, { error: 'NOT_FOUND' });
+    let fp = path.join(WEB_DIR, rel);
+    // If is directory, append index.html
+    let st;
+    try { st = fs.statSync(fp); } catch {}
+    if (st && st.isDirectory()) fp = path.join(fp, 'index.html');
+    serveStatic(res, fp, 0);
+    return;
+  }
+  // / → alias for promo /index.html (optional)
+  if (pname === '/index.html' || pname === '/promo.html') {
+    const fp = path.join(PROMO_DIR, pname === '/promo.html' ? 'index.html' : 'index.html');
+    serveStatic(res, fp, 0);
+    return;
+  }
+  sendJSON(res, 404, { error: 'NOT_FOUND', path: pname });
 });
 
 // ---------- WebSocket ----------

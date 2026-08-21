@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ChatHub · 聊天社区</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app" id="app" style="display:none">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sb-head">
+      <div class="sb-logo">💬</div>
+      <div class="sb-brand">ChatHub<small>为编程而聊</small></div>
+    </div>
+
+    <div style="flex:1;overflow-y:auto">
+      <div class="nav-sec">
+        <h4>主菜单</h4>
+        <div class="nav-item active" data-nav="chat"><span class="ic">💬</span><span class="lbl">频道聊天</span></div>
+        <div class="nav-item" data-nav="qna"><span class="ic">❓</span><span class="lbl">问答区</span></div>
+        <div class="nav-item" data-nav="admin" id="nav-admin" style="display:none"><span class="ic">🛡️</span><span class="lbl">管理后台</span></div>
+      </div>
+      <div class="nav-sec">
+        <h4>频道</h4>
+        <div id="channel-list"></div>
+      </div>
+      <div class="nav-sec">
+        <h4>私聊</h4>
+        <div id="dm-list"></div>
+      </div>
+    </div>
+
+    <div class="sb-user">
+      <div class="avatar" id="me-avatar">U</div>
+      <div class="sb-u-info">
+        <div class="sb-u-name" id="me-name">User</div>
+        <div class="sb-u-sub" id="me-sub">online</div>
+      </div>
+      <button class="sb-logout" id="logout-btn" title="退出登录">⎋</button>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <!-- CHAT TAB -->
+    <section class="tab-panel active" data-panel="chat">
+      <div class="main-head">
+        <div>
+          <div class="main-title"><span class="hash" id="cur-hash">#</span><span id="cur-ch">general</span></div>
+          <div class="main-sub" id="cur-topic">社区公共频道</div>
+        </div>
+        <div class="main-head-actions">
+          <button class="icon-btn" id="ws-status" title="连接状态" style="border-color:var(--green);color:var(--green)">●</button>
+        </div>
+      </div>
+      <div class="tab-panels">
+        <div class="messages" id="messages"></div>
+        <div class="typing" id="typing"><span></span><span></span><span></span></div>
+        <div class="composer">
+          <div class="composer-tools">
+            <div class="epos">
+              <button class="ct-btn" id="emoji-btn" title="表情">😊 表情</button>
+              <div class="emoji-panel" id="emoji-panel">
+                <div class="emoji-grid" id="emoji-grid"></div>
+              </div>
+            </div>
+            <label class="ct-btn attach">📎 图片
+              <input type="file" id="img-input" accept="image/*" multiple>
+            </label>
+            <div class="ct-sep"></div>
+            <button class="ct-btn" title="代码块" onclick="insertCodeBlock()"><code>{ }</code> 代码块</button>
+            <div class="ct-hint">支持 ``` 代码围栏 · @username 提及 · Shift+Enter 换行</div>
+          </div>
+          <div class="preview-images" id="preview-imgs"></div>
+          <div class="input-wrap">
+            <textarea id="input" placeholder="发消息给 #general… Enter 发送, Shift+Enter 换行" rows="1"></textarea>
+          </div>
+          <div class="send-row">
+            <div class="hint" id="mention-hint"></div>
+            <button class="btn-send" id="send-btn">发送 ⏎</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- QNA TAB -->
+    <section class="tab-panel" data-panel="qna">
+      <div class="main-head">
+        <div>
+          <div class="main-title">❓ 问答区</div>
+          <div class="main-sub">提问、回答、采纳最佳答案</div>
+        </div>
+        <div class="main-head-actions">
+          <button class="q-new-btn" id="new-q-btn">+ 发起提问</button>
+        </div>
+      </div>
+      <div class="tab-panels">
+        <div class="qna-layout" style="flex:1;min-height:0">
+          <div class="q-list" id="q-list">
+            <div class="empty"><div class="big">📭</div><h4>还没有问题</h4><p>点击右上角「+ 发起提问」来提第一个问题。</p></div>
+          </div>
+          <div class="q-detail" id="q-detail">
+            <div class="empty"><div class="big">👈</div><h4>选择一个问题</h4><p>从左侧选择一个问题查看详情和回答。</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ADMIN TAB -->
+    <section class="tab-panel" data-panel="admin" style="overflow-y:auto">
+      <div class="main-head">
+        <div>
+          <div class="main-title">🛡️ 管理后台</div>
+          <div class="main-sub" id="admin-sub">统计 · 用户管理</div>
+        </div>
+      </div>
+      <div class="admin-grid" id="admin-stats"></div>
+      <div class="admin-section">
+        <h3>👥 用户列表</h3>
+        <div style="overflow-x:auto">
+          <table class="adm-table">
+            <thead><tr><th>用户</th><th>用户名</th><th>注册时间</th><th>最近登录</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody id="admin-users"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Right: online users -->
+  <aside class="right">
+    <div class="right-head">🟢 在线成员 <span id="online-count" style="color:var(--muted);font-weight:500;font-size:12px;margin-left:4px"></span></div>
+    <div class="online-list" id="online-list"></div>
+  </aside>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"><span id="toast-ic">✓</span><span id="toast-txt"></span></div>
+
+<!-- New Question Modal -->
+<div class="modal-mask" id="q-mask">
+  <div class="modal" style="max-width:560px">
+    <h3>❓ 发起提问</h3>
+    <p class="desc">描述清楚你遇到的问题，可以贴代码、打标签，社区伙伴会来帮忙。</p>
+    <div class="fld">
+      <label>标题</label>
+      <input id="q-title" placeholder="一句话描述你的问题…（必填）" maxlength="120">
+    </div>
+    <div class="fld">
+      <label>标签（可多选，Ctrl/Cmd 点选多个）</label>
+      <select id="q-tags" multiple size="5" style="width:100%;padding:10px;border-radius:9px;background:var(--bg3);border:1px solid var(--border);color:var(--text)"></select>
+    </div>
+    <div class="fld">
+      <label>问题内容（支持 Markdown · ``` 代码块）</label>
+      <textarea id="q-body" rows="7" placeholder="详细描述问题，贴上复现代码会更容易被回答…" style="width:100%;padding:11px 14px;border-radius:10px;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:inherit;outline:none"></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="q-cancel">取消</button>
+      <button class="btn btn-primary" id="q-submit">发布问题</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+<script>
+window.ChatHubApp && window.ChatHubApp.boot();
+</script>
+</body>
+</html>
